@@ -7,15 +7,15 @@
 \alias{sra.matrix}
 \title{Compute the sequential rank agreement}
 \usage{
-sra(object, B = 1, ...)
+sra(object, B = 1, type = c("sd", "mad"), ...)
 
-\method{sra}{default}(object, B = 1)
+\method{sra}{default}(object, B = 1, type = c("sd", "mad"))
 
-\method{sra}{matrix}(object, B = 1, na.strings = c(NA, 0),
-  nitems = rows(object))
+\method{sra}{matrix}(object, B = 1, na.strings = NULL,
+  nitems = nrow(object), type = c("sd", "mad"))
 
-\method{sra}{list}(object, B = 1, na.strings = c(NA, 0),
-  nitems = max(sapply(object, length)))
+\method{sra}{list}(object, B = 1, na.strings = NULL,
+  nitems = max(sapply(object, length)), type = c("sd", "mad"))
 }
 \arguments{
 \item{object}{Either matrix where each column is a ranked list of
@@ -27,7 +27,9 @@ from a point onwards. See details for more information.}
 \item{B}{An integer giving the number of randomization to sample
 over in the case of censored observations}
 
-\item{na.strings}{Code for missing items}
+\item{type}{The type of measure to use. Either sd (standard deviation - the default) or mad (median absolute deviance)}
+
+\item{na.strings}{A vector of strings/values that represent missing values in addition to NA. Defaults to NULL which means only NA are censored values.}
 }
 \value{
 A vector of the sequential rank agreement
@@ -38,6 +40,9 @@ Compute the sequential rank agreement
 \examples{
 mlist <- matrix(cbind(1:8,c(1,2,3,5,6,7,4,8),c(1,5,3,4,2,8,7,6)),ncol=3)
 sra(mlist)
+
+mlist <- matrix(cbind(1:8,c(1,2,3,5,6,7,4,8),c(1,5,3,4,2,8,7,6)),ncol=3)
+sra(mlist, nitems=20, B=10)
 
 alist <- list(a=1:8,b=sample(1:8),c=sample(1:8))
 sra(alist)

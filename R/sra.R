@@ -5,14 +5,18 @@
 #' between 1 and the length of the lists. The lists should have the
 #' same length but censoring can be used by setting the list to zero
 #' from a point onwards. See details for more information.
-#' @param na.strings Code for missing items
+#' @param na.strings A vector of strings/values that represent missing values in addition to NA. Defaults to NULL which means only NA are censored values.
 #' @param B An integer giving the number of randomization to sample
 #' over in the case of censored observations
+#' @param type The type of measure to use. Either sd (standard deviation - the default) or mad (median absolute deviance)
 #' @return A vector of the sequential rank agreement
 ##' @examples
 ##'
 ##' mlist <- matrix(cbind(1:8,c(1,2,3,5,6,7,4,8),c(1,5,3,4,2,8,7,6)),ncol=3)
 ##' sra(mlist)
+##'
+##' mlist <- matrix(cbind(1:8,c(1,2,3,5,6,7,4,8),c(1,5,3,4,2,8,7,6)),ncol=3)
+##' sra(mlist, nitems=20, B=10)
 ##'
 ##' alist <- list(a=1:8,b=sample(1:8),c=sample(1:8))
 ##' sra(alist)
@@ -38,81 +42,28 @@
 #'
 #' @rdname sra
 #' @export
-sra <- function(object, B=1, ...) {
+sra <- function(object, B=1, type=c("sd", "mad"), ...) {
   UseMethod("sra")
 }
 
 #' @rdname sra
 #' @export
-sra.default <- function(object, B=1) {
-    # Make sure that the input object ends up as a matrix with integer columns all
-    # consisting of elements from 1 and up to listlength
-    if (!is.matrix(object))
-       stop("Input must be a matrix")
-
-    rankmat <- object
-
-    listlength <- nrow(rankmat)
-    nlists <- NCOL(rankmat)
-    nseq <- seq(listlength)
-
-    # Special version of sample needed
-    resample <- function(x, ...) x[sample.int(length(x), ...)]
-
-    # Compute a list of missing items for each list
-    missing.items <- lapply(as.data.frame(rankmat), function(x) { nseq[-x] })
-    nmissing.items <- sapply(missing.items, length)
-
-    ## Checking that all values are non-negative
-    if (min(rankmat)<0)
-        stop("Negative items not allowed")
-
-    ## Should make a sanity check that zeros are from a point onwards
-    if (!all(sapply(1:nlists, function(x) {
-                        res <- TRUE
-                        if (nmissing.items[x]>0) {
-                            if (sum(rankmat[(listlength-nmissing.items[[x]]+1):listlength,x])>0)
-                                { res <- FALSE }
-                        }
-                        res
-                    }))) {
-        stop("Censored ranked lists should be coded 0 from a rank onwards")
-    }
-
-    ## If there is no censoring then we should set B to 1
-    if (max(nmissing.items)==0) {
-        B <- 1
-    }
-
-    tmpres <- sapply(1:B, function(i) {
-        for (j in 1:nlists) {
-            if (length(missing.items[[j]])>0) {
-                rankmat[(listlength-length(missing.items[[j]])+1):listlength,j] <- resample(missing.items[[j]])
-            }
-        }
-        res <- sracppfull(rankmat)
-        res
-    })
-
-    agreement <- apply(tmpres, 1, mean)
-
-    class(agreement) <- "sra"
-    attr(agreement, "B") <- B
-
-    agreement
+sra.default <- function(object, B=1, type=c("sd", "mad")) {
+    stop("Input must be either a matrix, a data.frame or a list.")
 }
-
 
 #' @rdname sra
 #' @export
-sra.matrix <- function(object, B=1, na.strings=c(NA, 0), nitems=nrow(object)) {
+sra.matrix <- function(object, B=1, na.strings=NULL, nitems=nrow(object), type=c("sd", "mad")) {
     if (!is.matrix(object))
         stop("Input object must be a matrix")
 
-    ## Convert all missing types to zeros
-    object[object %in% na.strings] <- 0
+    ## Convert all missing types to NAs
+    if (!is.null(na.strings)) {
+        object[object %in% na.strings] <- NA
+    }
 
-    unique.items <- length(unique(object[object != 0]))
+    unique.items <- length(unique(object[!is.na(object)]))
 
     ## Check that we dont have more unique values than rows
     if (unique.items > nitems) {
@@ -121,51 +72,60 @@ sra.matrix <- function(object, B=1, na.strings=c(NA, 0), nitems=nrow(object)) {
 
     ## Expand the columns in the matrix to have length unique.items
     if (nitems>nrow(object)) {
-        glue <- matrix(rep(0, ncol(object)*(nitems - nrow(object))), ncol=ncol(object))
+        glue <- matrix(rep(NA, NCOL(object)*(nitems - nrow(object))), ncol=NCOL(object))
         object <- rbind(object, glue)
     }
-
-    sra.default(object, B=B)
+    object <- lapply(1:NCOL(object),function(j)object[,j]) # Convert matrix to list
+    sra.list(object, B=B, nitems=nitems, type=type)
 }
 
 
 
 #' @rdname sra
 #' @export
-sra.list <- function(object, B=1, na.strings=c(NA, 0), nitems=max(sapply(object, length))) {
-
+sra.list <- function(object, B=1, na.strings=NULL, nitems=max(sapply(object, length)), type=c("sd", "mad")) {
     # Make sure that the input object ends up as a matrix with integer columns all
     # consisting of elements from 1 and up to listlength
 
-    stopifnot(is.list(object)) # data.frame is a list
-    nlists <- length(object)
+    stopifnot(is.list(object))
 
-    ## sanity checks
+    nlists <- length(object)
+    nitems <- nitems ## force evaluation here
+
+    type <- match.arg(type)
+
+    ## Sanity checks
     object <- lapply(1:length(object),function(j){
-                                 x <- object[[j]]
-                                 out <- which(is.na(x))
-                                 na.strings <- na.strings[!is.na(na.strings)]
-                                 if (length(na.strings)>0)
-                                     out <- c(out,grep(paste0("^",na.strings,"$"),x))
-                                 ## remove censored items with side effect:
-                                 ## in case where all lists have trailing censored information
-                                 ## this is pruned
-                                 if (length(out)>0)
-                                     x <- x[-out]
-                                 # stop at duplicated items
-                                 if (any(duplicated(x)))
-                                     stop(paste0("Duplicated items found in list ",j))
-                                 x
-                             })
+                         x <- object[[j]]
+                         ## Add the NA items to be removed
+                         out <- which(is.na(x))
+                         if (!is.null(na.strings)) {
+                             na.strings <- na.strings[!is.na(na.strings)]
+                             out <- c(out,grep(paste0("^",na.strings,"$"),x))
+                         }
+                         ## remove censored items with side effect:
+                         ## in case where all lists have trailing censored information
+                         ## this is pruned
+                         if (length(out)>0)
+                             x <- x[-out]
+                         ## stop at duplicated items
+                         if (any(duplicated(x)))
+                             stop(paste0("Duplicated items found in list ",j))
+                         x
+                     })
     ## check class of elements, then coerce to integer
+
     cc <- sapply(object, class)
     if (length(cc <- unique(cc))>1)
-       stop(paste("All elements of object must have the same class. Found:",paste(cc,collapse=", ")))
+        stop(paste("All elements of object must have the same class. Found:",paste(cc,collapse=", ")))
+
     if (match(cc,c("integer","character","numeric","factor"),nomatch=0)==0)
         stop("Class of lists in object should be one of 'integer', 'character', 'numeric' or 'factor'.")
+
     labels <- unique(unlist(object,recursive=TRUE,use.names=FALSE))
-    nitems <- length(labels)
-    ### if (match(c("sraNULL"),labels,nomatch=0)>0) stop("Item name sraNULL is reserved for missing items")
+
+    nitems <- max(nitems, length(labels))
+
     object <- lapply(object,function(x){as.integer(factor(x,levels=labels))})
 
     ## items are coded as 1, 2, 3, ...
@@ -174,9 +134,7 @@ sra.list <- function(object, B=1, na.strings=c(NA, 0), nitems=max(sapply(object,
 
     ## Compute a list of missing items for each list
     missing.items <- lapply(object, function(x) {items[match(items,x,nomatch=0)==0]})
-    ### missing.items1 <- lapply(object, function(x) {items[-x]})
     nmiss <- sapply(missing.items,length)
-
 
     ## fill too short lists with 0 (code for missing)
     ll <- sapply(object,length)
@@ -190,38 +148,71 @@ sra.list <- function(object, B=1, na.strings=c(NA, 0), nitems=max(sapply(object,
     iscensored <- any(nmiss!=0)
     if (B!=1 && (!iscensored || (max(nmiss)==1))) {B <- 1}
 
-    ## Fast conversion from list to matrix
-    object <- matrix(unlist(object), ncol = nlists)
+    itype <- 0
+    if (type == "mad")
+        itype <- 1
 
-    ## Call the computation
-    sra.default(object, B=B)
+    # Special version of sample needed
+    resample <- function(x, ...) x[sample.int(length(x), ...)]
+    tmpres <- sapply(1:B, function(b) {
+                         obj.b <- lapply(1:nlists,function(j){
+                                             list <- object[[j]]
+                                             if (nmiss[[j]]>0){
+                                                 list[list==0] <- resample(missing.items[[j]])
+                                             }
+                                             list
+                                         })
+                         ## bind lists
+                         rankmat <- do.call("cbind",obj.b)
+                         res <- sracppfull(rankmat, type=itype)
+                         res
+                     })
+    if (itype==0) {
+        agreement <- sqrt(rowMeans(tmpres))
+    } else {
+        agreement <- rowMeans(tmpres)
+    }
+    names(agreement) <- items
+    class(agreement) <- "sra"
+    attr(agreement, "B") <- B
+    attr(agreement, "type") <- type
+    agreement
+
 }
-
 
 
 #' Simulate sequential rank agreement for randomized unrelated lists
 #'
-#' @param obj Either a vector or matrix
+#' @param obj A matrix
 #' @param B Either a vector or matrix
 #' @param n the number of sequential rank agreement curves to produce
+#' @param na.strings A vector of character values that represent vensored observations
+#' @param type The type of measure to use. Either sd (standard deviation - the default) or mad (median absolute deviance)
 #' @return A matrix with n columns each representing the sequential rank agreement obtained from
 #' @author Claus Ekstrøm <ekstrom@@sund.ku.dk>
 #' @export
-random_list_sra <- function(object, B=1, n=1) {
+random_list_sra <- function(object, B=1, n=1, na.strings=NULL, type=c("sd", "mad")) {
+
+    type <- match.arg(type)
 
     ## Make sure that the input object ends up as a matrix with integer columns all
     ## consisting of elements from 1 and up to listlength
     if (!is.matrix(object))
         object <- as.matrix(do.call("cbind",object))
 
+    ## Convert all missing types to NAs
+    if (!is.null(na.strings)) {
+        object[object %in% na.strings] <- NA
+    }
+
     nitems <- nrow(object)
-    notmiss <- apply(object, 2, function(x) {sum(x>0)} )
+    notmiss <- apply(object, 2, function(x) {sum(!is.na(x))} )
     res <- sapply(1:n, function(i) {
         ## Do a permutation with the same number of missing
         for (j in 1:ncol(object)) {
-            object[,j] <- c(sample(nitems, size=notmiss[j]), rep(0, nitems-notmiss[j]))
+            object[,j] <- c(sample(nitems, size=notmiss[j]), rep(NA, nitems-notmiss[j]))
         }
-        sra(object, B=B)
+        sra(object, B=B, type=type)
     })
     res
 
@@ -231,7 +222,7 @@ random_list_sra <- function(object, B=1, n=1) {
 
 #' Smooth quantiles of a matrix of sequential ranked agreements
 #'
-#' @param obj A matrix
+#' @param object A matrix
 #' @param confidence the limits to compute
 #' @return A list containing two vectors for the smoothed lower and upper limits
 #' @author Claus Ekstrøm <ekstrom@@sund.ku.dk>
@@ -241,4 +232,34 @@ smooth_sra <- function(object, confidence=0.95) {
     alpha <- (1-confidence)/2
     limits <- apply(object, 1, function(x) { quantile(x, probs=c(alpha, 1-alpha)) })
     list(lower=limits[1,], upper=limits[2,])
+}
+
+
+
+#' Compute a Kolmogorov-Smirnoff-like test for Smooth quantiles of a matrix of sequential ranked agreements
+#'
+#' @param object The results from an sra
+#' @param nullobject the limits to compute
+#' @param weights Either a single value or a vector of the same length as the number of item with the weight that should be given to specific depths
+#' @return A single value corresponding to the p-value
+#' @author Claus Ekstrøm <ekstrom@@sund.ku.dk>
+#' @export
+test_sra <- function(object, nullobject, weights=1) {
+    ## Sanity checks
+    if (! (length(weights) %in% c(1, length(object))))
+        stop("the vector of weights must have the same length as the number of items")
+
+    ## Test statistic
+    T <- max(weights*abs(object - apply(nullobject, 1, mean)))
+
+    ## Now compute the individual jackknife variations from the null object
+    B <- ncol(nullobject)
+    nullres <- sapply(1:B, function(i) {
+        max(weights*abs(nullobject[,i] - apply(nullobject[,-i], 1, mean)))
+    })
+
+    res <- sum(nullres>=T)/(B+1)
+    attr(res, "B") <- B
+    return(res)
+
 }
